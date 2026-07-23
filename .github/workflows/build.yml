@@ -22,18 +22,23 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y gcc
 
+    - name: Debug - List Repository Files
+      run: |
+        echo "📂 当前仓库文件列表："
+        ls -la
+
     - name: Auto-initialize Go Module and Build
       run: |
-        # 1. 如果仓库中没有 go.mod 文件，自动初始化并整理依赖
+        # 1. 自动初始化 go.mod (如果缺失)
         if [ ! -f go.mod ]; then
           echo "⚠️ 未检测到 go.mod 文件，正在自动初始化模块..."
           go mod init nxso
           go mod tidy
         fi
 
-        # 2. 执行 CGO 动态共享库编译
+        # 2. 执行编译（使用 . 代表当前整个目录，避免包路径误判）
         echo "🚀 正在编译 .so 动态共享库..."
-        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o nezha_agent.so main.go
+        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o nezha_agent.so .
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
