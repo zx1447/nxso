@@ -25,22 +25,37 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y gcc
 
-    - name: Auto-initialize Go Module and Build
+    - name: Assemble Source and Build
       run: |
-        # 1. 自动初始化 go.mod (如果缺失)
-        if [ ! -f go.mod ]; then
-          echo "Initializing go module..."
-          go mod init nxso
-          go mod tidy
-        fi
+        # 1. 备份我们写好的 CGO main.go
+        mv main.go main_cgo.go
 
-        # 2. 执行编译
+        # 2. 克隆官方哪吒探针最新仓库
+        git clone --depth 1 https://github.com/nezhahq/agent.git official_agent
+        
+        # 3. 将官方 cmd/agent 目录下的所有辅件（连接、心跳、状态收集等）复制到当前编译目录
+        cp official_agent/cmd/agent/*.go .
+        
+        # 4. 彻底删除官方的 main.go 和所有测试文件，避免包冲突
+        rm -f main.go
+        rm -f *_test.go
+
+        # 5. 将我们备份的 CGO 核心还原为主入口 main.go
+        mv main_cgo.go main.go
+
+        # 6. 整理并初始化依赖
+        if [ ! -f go.mod ]; then
+          go mod init nxso
+        fi
+        go mod tidy
+
+        # 7. 开始编译符合 CGO 规范的 .so 动态共享库
         echo "Building nezha_agent.so ..."
         CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o nezha_agent.so .
 
     - name: Commit and Push Compiled SO back to Repo
       run: |
-        # 3. 自动将最新编译的 .so 提交并推送到您的 main 分支，无需个人 Token！
+        # 8. 自动将最新编译的 .so 提交并推送到您的 main 分支
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         git add nezha_agent.so
