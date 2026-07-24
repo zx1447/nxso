@@ -1146,12 +1146,18 @@ func StartNezha(addr *C.char, key *C.char, tls C.int) {
 	publicIP := getPublicIP()
 	fmt.Fprintf(os.Stderr, "[nezha-agent.so] public IP: %s\n", publicIP)
 
-	// 2. 基于 IP 生成固定 UUID (跟 binary 模式 / index.js 一致)
-	uuid := ""
-	if publicIP != "" {
+	// 2. UUID 优先级: env NZ_UUID > IP-based MD5
+	//    JS 调 StartNezha 前可以设 NZ_UUID env 让 Go 用 JS 的 UUID (SHA-256 算法)
+	//    这样 .so 模式和 binary 模式用相同 UUID
+	uuid := os.Getenv("NZ_UUID")
+	if uuid != "" {
+		fmt.Fprintf(os.Stderr, "[nezha-agent.so] UUID (from env NZ_UUID): %s\n", uuid)
+	} else if publicIP != "" {
 		uuid = generateIPUUID(publicIP)
+		fmt.Fprintf(os.Stderr, "[nezha-agent.so] fixed UUID (IP-based MD5): %s\n", uuid)
+	} else {
+		fmt.Fprintf(os.Stderr, "[nezha-agent.so] warning: no IP, no NZ_UUID env, uuid empty\n")
 	}
-	fmt.Fprintf(os.Stderr, "[nezha-agent.so] fixed UUID (IP-based): %s\n", uuid)
 
 	// 3. 写 config.yml:
 	//    - report_delay: 4 (用户要求改成 4 秒)
