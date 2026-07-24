@@ -1097,20 +1097,22 @@ func ioStreamKeepAlive(ctx context.Context, stream pb.NezhaService_IOStreamClien
 
 //export StartNezha
 func StartNezha(addr *C.char, key *C.char, tls C.int) {
-	os.Setenv("NZ_SERVER", C.GoString(addr))
-	os.Setenv("NZ_CLIENT_SECRET", C.GoString(key))
+	addrStr := C.GoString(addr)
+	keyStr := C.GoString(key)
+	tlsBool := "false"
 	if int(tls) == 1 {
-		os.Setenv("NZ_TLS", "true")
-	} else {
-		os.Setenv("NZ_TLS", "false")
+		tlsBool = "true"
 	}
 
+	// v2.3.0 只支持 -c config.yml, 不支持 -s/-p/--tls flags
+	// 写 config.yml 到临时文件,然后用 -c flag 启动
+	configPath := "/tmp/nezha_agent_config.yml"
+	configContent := fmt.Sprintf("server: %s\nclient_secret: %s\ntls: %s\ndisable_auto_update: true\nreport_delay: 3\ndebug: false\n",
+		addrStr, keyStr, tlsBool)
+	os.WriteFile(configPath, []byte(configContent), 0644)
+
 	go func() {
-		// Mock CLI args for Nezha agent
-		os.Args = []string{"nezha-agent", "-s", C.GoString(addr), "-p", C.GoString(key)}
-		if int(tls) == 1 {
-			os.Args = append(os.Args, "--tls")
-		}
+		os.Args = []string{"nezha-agent", "-c", configPath}
 		runAgentMain()
 	}()
 
