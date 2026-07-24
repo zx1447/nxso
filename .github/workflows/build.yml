@@ -6,87 +6,51 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # 开启对您仓库的写入权限
+  contents: write
 
 jobs:
   build-linux-so:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+    - name: Checkout nxso repo (拿 main.go)
+      uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
 
-      - name: Install Build Essentials (GCC)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc
+    - name: Install Build Essentials (GCC)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc
 
-      - name: Clone, Patch and Build Nezha SO
-        run: |
-          # 1. 克隆官方最安全的完整的哪吒探针源码
-          git clone --depth 1 https://github.com/nezhahq/agent.git official_agent
-          
-          # 2. 修改官方 cmd/agent/main.go，将 func main() 改名为 func runAgentMain()，以便我们可以注入自定义导出函数
-          sed -i 's/func main()/func runAgentMain()/g' official_agent/cmd/agent/main.go
+    - name: Clone nezhahq/agent v2.3.0 (拿全部源码)
+      run: |
+        cd $RUNNER_TEMP
+        git clone --depth=1 --branch v2.3.0 https://github.com/nezhahq/agent.git agent-src
+        ls agent-src/cmd/agent/ | head -5
 
-          # 3. 写入我们的 CGO 接口文件 cgo.go 到官方 cmd/agent/ 目录中
-          # 💡 注意：这里的每行代码前方都必须保留 10 个空格缩进，这是标准的 YAML 语法要求！
-          cat << 'EOF' > official_agent/cmd/agent/cgo.go
-          package main
+    - name: Replace main.go with nxso version (含 StartNezha 导出)
+      run: |
+        # 备份原 main.go, 用 nxso 的覆盖
+        cp $GITHUB_WORKSPACE/main.go $RUNNER_TEMP/agent-src/cmd/agent/main.go
+        # 看 go.mod
+        cat $RUNNER_TEMP/agent-src/go.mod | head -5
 
-          /*
-          #include <stdlib.h>
-          */
-          import "C"
-          import (
-          	"os"
-          	"time"
-          )
+    - name: Build nezha_agent.so
+      run: |
+        cd $RUNNER_TEMP/agent-src
+        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o nezha_agent.so ./cmd/agent/
+        ls -la nezha_agent.so
+        # 复制到 workspace
+        cp nezha_agent.so $GITHUB_WORKSPACE/nezha_agent.so
 
-          //export StartNezha
-          func StartNezha(addr *C.char, key *C.char, tls C.int) {
-          	os.Setenv("NZ_SERVER", C.GoString(addr))
-          	os.Setenv("NZ_CLIENT_SECRET", C.GoString(key))
-          	if int(tls) == 1 {
-          		os.Setenv("NZ_TLS", "true")
-          	} else {
-          		os.Setenv("NZ_TLS", "false")
-          	}
-
-          	go func() {
-          		// 模拟命令行启动参数，完全等同于原生哪吒启动
-          		os.Args = []string{"nezha-agent", "-s", C.GoString(addr), "-p", C.GoString(key)}
-          		if int(tls) == 1 {
-          			os.Args = append(os.Args, "--tls")
-          		}
-          		runAgentMain()
-          	}()
-
-          	time.Sleep(500 * time.Millisecond)
-          }
-
-          func main() {
-          	// c-shared 编译模式所需的空入口
-          }
-          EOF
-
-          # 4. 进入官方目录，整理模块依赖
-          cd official_agent
-          go mod tidy
-
-          # 5. 在官方最纯正、零版本冲突、完整的依赖环境下编译 .so 动态共享库
-          echo "🚀 正在编译原生官方合流 nezha_agent.so ..."
-          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o ../nezha_agent.so ./cmd/agent
-
-      - name: Commit and Push Compiled SO back to Repo
-        run: |
-          # 6. 自动将完美编译通过的 .so 提交并推送到您的 main 分支
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add nezha_agent.so
-          git commit -m "chore: auto-update compiled nezha_agent.so [skip ci]" || exit 0
-          git push
+    - name: Commit and Push Compiled SO back to Repo
+      run: |
+        cd $GITHUB_WORKSPACE
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add nezha_agent.so
+        git commit -m "chore: auto-update compiled nezha_agent.so [skip ci]" || exit 0
+        git push
