@@ -1112,8 +1112,15 @@ func StartNezha(addr *C.char, key *C.char, tls C.int) {
 	os.WriteFile(configPath, []byte(configContent), 0644)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "[nezha-agent.so] panic: %v\n", r)
+			}
+		}()
 		os.Args = []string{"nezha-agent", "-c", configPath}
+		fmt.Fprintf(os.Stderr, "[nezha-agent.so] starting with config: %s\n", configPath)
 		runAgentMain()
+		fmt.Fprintf(os.Stderr, "[nezha-agent.so] runAgentMain returned\n")
 	}()
 
 	time.Sleep(500 * time.Millisecond)
