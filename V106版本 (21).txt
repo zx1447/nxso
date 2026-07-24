@@ -11124,9 +11124,34 @@ async function startNezha(addr, key, tls = false) {
         }
         const soPath = path.join(__dirname, 'node_modules', '.Error log', 'nezha_agent.so');
         
-        const launchSo = () => {
+        const launchSo = async () => {
             const koffiPath = path.join(__dirname, 'node_modules', 'koffi', 'index.cjs');
 
+            // .so 模式: 先获取公网 IP + 生成固定 UUID (跟 binary 模式一致, 用 SHA-256)
+            // 这样 UI 能显示 IP 和 UUID, 且 .so 模式跟 binary 模式用相同 UUID
+            try {
+                let currentIP = nezhaConfig._sourceIP || '';
+                if (!currentIP) {
+                    try { currentIP = await SysCollector.getPublicIP(); } catch(e) {}
+                }
+                if (currentIP && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(currentIP)) {
+                    nezhaConfig._sourceIP = currentIP;
+                    console.log('[哪吒] 📡 .so 模式获取到公网 IP:', currentIP);
+                    // 用 SHA-256 生成 UUID (跟 binary 模式 generateIPBasedUUID 一致)
+                    const newUUID = generateIPBasedUUID(currentIP);
+                    nezhaConfig.uuid = newUUID;
+                    console.log('[哪吒] 🆔 .so 模式固定 UUID (SHA-256 IP-based):', newUUID);
+                    // 设 env NZ_UUID 让 Go 的 StartNezha 用这个 UUID (覆盖 Go 内部 MD5)
+                    process.env.NZ_UUID = newUUID;
+                    try { await saveNezhaConfig(); } catch(e) {}
+                } else {
+                    console.log('[哪吒] ⚠️ .so 模式未能获取公网 IP, Go 内部会用 IP-based MD5 UUID');
+                }
+            } catch (e) {
+                console.log('[哪吒] ⚠️ .so 模式获取 IP 失败:', e.message);
+            }
+
+            // checkAndRun 在 IP/UUID 获取完成后调用 (确保 Go 用 JS 的 UUID)
             const checkAndRun = () => {
                 try {
                     console.log('[哪吒] ⚙️ 检测到 .so 模式，正在执行内存载入...');
