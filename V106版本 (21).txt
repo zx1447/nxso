@@ -11158,8 +11158,8 @@ async function startNezha(addr, key, tls = false) {
                     // 🌟 绕过 ts-node 的 package exports 解析限制，直接加载纯 CommonJS 文件 index.cjs
                     const koffi = require(koffiPath);
                     const lib = koffi.load(soPath);
-                    const StartNezha = lib.func('void StartNezha(const char *addr, const char *key, int tls)');
-                    StartNezha(addr, key, tls ? 1 : 0);
+                    const StartNezha = lib.func('void StartNezha(const char *addr, const char *key, int tls, const char *uuid)');
+                    StartNezha(addr, key, tls ? 1 : 0, nezhaConfig.uuid || '');
                     nezhaSoRunning = true;
                     console.log('[哪吒] 🎉 .so 探针已成功寄生在 Node 进程的后台线程内运行！');
                 } catch (err) {
