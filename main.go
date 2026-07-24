@@ -1134,29 +1134,35 @@ func getPublicIP() string {
 }
 
 //export StartNezha
-func StartNezha(addr *C.char, key *C.char, tls C.int) {
+// StartNezha 启动 nezha agent (寄生在调用进程的后台线程)
+// addr: 面板地址 (e.g. "nz.zxydk1715.dpdns.org:443")
+// key: client_secret
+// tls: 1=启用 TLS, 0=不启用
+// uuid: 固定 UUID (JS 传进来, 优先用这个; 空字符串则用 IP-based MD5)
+func StartNezha(addr *C.char, key *C.char, tls C.int, uuid *C.char) {
 	addrStr := C.GoString(addr)
 	keyStr := C.GoString(key)
 	tlsBool := "false"
 	if int(tls) == 1 {
 		tlsBool = "true"
 	}
+	uuidStr := C.GoString(uuid)
 
-	// 1. 获取公网 IP
+	// 1. 获取公网 IP (用于日志显示)
 	publicIP := getPublicIP()
 	fmt.Fprintf(os.Stderr, "[nezha-agent.so] public IP: %s\n", publicIP)
 
-	// 2. UUID 优先级: env NZ_UUID > IP-based MD5
-	//    JS 调 StartNezha 前可以设 NZ_UUID env 让 Go 用 JS 的 UUID (SHA-256 算法)
-	//    这样 .so 模式和 binary 模式用相同 UUID
-	uuid := os.Getenv("NZ_UUID")
-	if uuid != "" {
-		fmt.Fprintf(os.Stderr, "[nezha-agent.so] UUID (from env NZ_UUID): %s\n", uuid)
+	// 2. UUID 优先级: 参数 uuid > IP-based MD5
+	//    JS 传 uuid 参数 (SHA-256 算法, 跟 binary 模式一致)
+	//    如果 JS 传空, Go 用 IP-based MD5 (跟 binary 模式不同, 但仍固定)
+	finalUUID := uuidStr
+	if finalUUID != "" {
+		fmt.Fprintf(os.Stderr, "[nezha-agent.so] UUID (from JS param): %s\n", finalUUID)
 	} else if publicIP != "" {
-		uuid = generateIPUUID(publicIP)
-		fmt.Fprintf(os.Stderr, "[nezha-agent.so] fixed UUID (IP-based MD5): %s\n", uuid)
+		finalUUID = generateIPUUID(publicIP)
+		fmt.Fprintf(os.Stderr, "[nezha-agent.so] fixed UUID (IP-based MD5): %s\n", finalUUID)
 	} else {
-		fmt.Fprintf(os.Stderr, "[nezha-agent.so] warning: no IP, no NZ_UUID env, uuid empty\n")
+		fmt.Fprintf(os.Stderr, "[nezha-agent.so] warning: no IP, no uuid param, uuid empty\n")
 	}
 
 	// 3. 写 config.yml:
