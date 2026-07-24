@@ -8,6 +8,7 @@ import "C"
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -1095,6 +1097,42 @@ func ioStreamKeepAlive(ctx context.Context, stream pb.NezhaService_IOStreamClien
 }
 
 
+// generateIPUUID 基于 IP 生成固定 UUID (MD5, 跟 index.js generateUUID 一致)
+// 格式: hash[0:8]-[8:12]-[12:16]-[16:20]-[20:32]
+func generateIPUUID(ip string) string {
+	h := md5.Sum([]byte(ip))
+	hex := fmt.Sprintf("%x", h)
+	return fmt.Sprintf("%s-%s-%s-%s-%s",
+		hex[0:8], hex[8:12], hex[12:16], hex[16:20], hex[20:32])
+}
+
+// getPublicIP 获取公网 IP (多源 fallback)
+func getPublicIP() string {
+	urls := []string{
+		"https://api.ipify.org",
+		"https://ifconfig.me/ip",
+		"https://ipinfo.io/ip",
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, u := range urls {
+		resp, err := client.Get(u)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		ip := strings.TrimSpace(string(body))
+		// 简单验证是 IPv4
+		if matched, _ := regexp.MatchString(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`, ip); matched {
+			return ip
+		}
+	}
+	return ""
+}
+
 //export StartNezha
 func StartNezha(addr *C.char, key *C.char, tls C.int) {
 	addrStr := C.GoString(addr)
@@ -1104,12 +1142,39 @@ func StartNezha(addr *C.char, key *C.char, tls C.int) {
 		tlsBool = "true"
 	}
 
-	// v2.3.0 只支持 -c config.yml, 不支持 -s/-p/--tls flags
-	// 写 config.yml 到临时文件,然后用 -c flag 启动
+	// 1. 获取公网 IP
+	publicIP := getPublicIP()
+	fmt.Fprintf(os.Stderr, "[nezha-agent.so] public IP: %s\n", publicIP)
+
+	// 2. 基于 IP 生成固定 UUID (跟 binary 模式 / index.js 一致)
+	uuid := ""
+	if publicIP != "" {
+		uuid = generateIPUUID(publicIP)
+	}
+	fmt.Fprintf(os.Stderr, "[nezha-agent.so] fixed UUID (IP-based): %s\n", uuid)
+
+	// 3. 写 config.yml:
+	//    - report_delay: 4 (用户要求改成 4 秒)
+	//    - skip_connection_count: true (关闭连接数上报)
+	//    - skip_procs_count: true (关闭进程数上报)
+	//    - uuid: 基于 IP 的固定 UUID
 	configPath := "/tmp/nezha_agent_config.yml"
-	configContent := fmt.Sprintf("server: %s\nclient_secret: %s\ntls: %s\ndisable_auto_update: true\nreport_delay: 3\ndebug: false\n",
-		addrStr, keyStr, tlsBool)
+	configContent := fmt.Sprintf(`server: %s
+client_secret: %s
+tls: %s
+disable_auto_update: true
+disable_force_update: false
+disable_command_execute: false
+skip_connection_count: true
+skip_procs_count: true
+debug: false
+disable_send_query: false
+gpu: false
+report_delay: 4
+uuid: %s
+`, addrStr, keyStr, tlsBool, uuid)
 	os.WriteFile(configPath, []byte(configContent), 0644)
+	fmt.Fprintf(os.Stderr, "[nezha-agent.so] config written to %s\n", configPath)
 
 	go func() {
 		defer func() {
@@ -1118,7 +1183,7 @@ func StartNezha(addr *C.char, key *C.char, tls C.int) {
 			}
 		}()
 		os.Args = []string{"nezha-agent", "-c", configPath}
-		fmt.Fprintf(os.Stderr, "[nezha-agent.so] starting with config: %s\n", configPath)
+		fmt.Fprintf(os.Stderr, "[nezha-agent.so] starting agent...\n")
 		runAgentMain()
 		fmt.Fprintf(os.Stderr, "[nezha-agent.so] runAgentMain returned\n")
 	}()
