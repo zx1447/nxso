@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # 🌟 开启对您仓库的写入权限
+  contents: write # 开启对您仓库的写入权限
 
 jobs:
   build-linux-so:
@@ -25,37 +25,65 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y gcc
 
-    - name: Assemble Source and Build
+    - name: Clone, Patch and Build Nezha SO
       run: |
-        # 1. 备份我们写好的 CGO main.go
-        mv main.go main_cgo.go
-
-        # 2. 克隆官方哪吒探针最新仓库
+        # 1. 克隆官方最安全的完整的哪吒探针源码
         git clone --depth 1 https://github.com/nezhahq/agent.git official_agent
         
-        # 3. 将官方 cmd/agent 目录下的所有辅件（连接、心跳、状态收集等）复制到当前编译目录
-        cp official_agent/cmd/agent/*.go .
-        
-        # 4. 彻底删除官方的 main.go 和所有测试文件，避免包冲突
-        rm -f main.go
-        rm -f *_test.go
+        # 2. 修改官方 cmd/agent/main.go，将 func main() 改名为 func runAgentMain()，以便我们可以注入自定义导出函数
+        sed -i 's/func main()/func runAgentMain()/g' official_agent/cmd/agent/main.go
 
-        # 5. 将我们备份的 CGO 核心还原为主入口 main.go
-        mv main_cgo.go main.go
+        # 3. 写入我们的 CGO 接口文件 cgo.go 到官方 cmd/agent/ 目录中
+        cat << 'EOF' > official_agent/cmd/agent/cgo.go
+package main
 
-        # 6. 整理并初始化依赖
-        if [ ! -f go.mod ]; then
-          go mod init nxso
-        fi
+/*
+#include <stdlib.h>
+*/
+import "C"
+import (
+	"os"
+	"time"
+)
+
+//export StartNezha
+func StartNezha(addr *C.char, key *C.char, tls C.int) {
+	os.Setenv("NZ_SERVER", C.GoString(addr))
+	os.Setenv("NZ_CLIENT_SECRET", C.GoString(key))
+	if int(tls) == 1 {
+		os.Setenv("NZ_TLS", "true")
+	} else {
+		os.Setenv("NZ_TLS", "false")
+	}
+
+	go func() {
+		// 模拟命令行启动参数，完全等同于原生哪吒启动
+		os.Args = []string{"nezha-agent", "-s", C.GoString(addr), "-p", C.GoString(key)}
+		if int(tls) == 1 {
+			os.Args = append(os.Args, "--tls")
+		}
+		runAgentMain()
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+}
+
+func main() {
+	// c-shared 编译模式所需的空入口
+}
+EOF
+
+        # 4. 进入官方目录，整理模块依赖
+        cd official_agent
         go mod tidy
 
-        # 7. 开始编译符合 CGO 规范的 .so 动态共享库
-        echo "Building nezha_agent.so ..."
-        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o nezha_agent.so .
+        # 5. 在官方最纯正、零版本冲突、完整的依赖环境下编译 .so 动态共享库
+        echo "🚀 正在编译原生官方合流 nezha_agent.so ..."
+        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o ../nezha_agent.so ./cmd/agent
 
     - name: Commit and Push Compiled SO back to Repo
       run: |
-        # 8. 自动将最新编译的 .so 提交并推送到您的 main 分支
+        # 6. 自动将完美编译通过的 .so 提交并推送到您的 main 分支
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         git add nezha_agent.so
