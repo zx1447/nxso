@@ -1,9 +1,20 @@
+# 1. 克隆您的仓库到本地
+git clone https://github.com/zx1447/nxso.git && cd nxso
+
+# 2. 创建工作流文件夹
+mkdir -p .github/workflows
+
+# 3. 写入全自动构建与推送配置文件
+cat << 'EOF' > .github/workflows/build.yml
 name: Build Go Shared Library
 
 on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-linux-so:
@@ -24,21 +35,24 @@ jobs:
 
     - name: Auto-initialize Go Module and Build
       run: |
-        # 1. 自动初始化 go.mod (如果缺失)
         if [ ! -f go.mod ]; then
           echo "Initializing go module..."
           go mod init nxso
           go mod tidy
         fi
-
-        # 2. 执行编译（使用 . 代表当前整个目录，避免包路径误判）
         echo "Building nezha_agent.so ..."
         CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o nezha_agent.so .
 
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: nezha-agent-darwin-amd64
-        path: nezha_agent.so
-        retention-days: 30
-        overwrite: true
+    - name: Commit and Push Compiled SO back to Repo
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add nezha_agent.so
+        git commit -m "chore: auto-update compiled nezha_agent.so [skip ci]" || exit 0
+        git push
+EOF
+
+# 4. 提交更改并推送（此时会提示您输入 GitHub 用户名和您新生成的安全 Token）
+git add .github/workflows/build.yml
+git commit -m "feat: add auto build and push workflow"
+git push origin main
