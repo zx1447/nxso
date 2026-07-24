@@ -1,5 +1,10 @@
 package main
 
+/*
+#include <stdlib.h>
+*/
+import "C" 
+
 import (
 	"bytes"
 	"context"
@@ -1089,11 +1094,6 @@ func ioStreamKeepAlive(ctx context.Context, stream pb.NezhaService_IOStreamClien
 	}
 }
 
-
-/*
-#include <stdlib.h>
-*/
-import "C"
 
 //export StartNezha
 func StartNezha(addr *C.char, key *C.char, tls C.int) {
