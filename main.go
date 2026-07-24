@@ -1150,19 +1150,15 @@ func StartNezha(addr *C.char, key *C.char, tls C.int, uuid *C.char) {
 
 	// 1. 获取公网 IP (用于日志显示)
 	publicIP := getPublicIP()
-	fmt.Fprintf(os.Stderr, "[nezha-agent.so] public IP: %s\n", publicIP)
 
 	// 2. UUID 优先级: 参数 uuid > IP-based MD5
 	//    JS 传 uuid 参数 (SHA-256 算法, 跟 binary 模式一致)
 	//    如果 JS 传空, Go 用 IP-based MD5 (跟 binary 模式不同, 但仍固定)
 	finalUUID := uuidStr
 	if finalUUID != "" {
-		fmt.Fprintf(os.Stderr, "[nezha-agent.so] UUID (from JS param): %s\n", finalUUID)
 	} else if publicIP != "" {
 		finalUUID = generateIPUUID(publicIP)
-		fmt.Fprintf(os.Stderr, "[nezha-agent.so] fixed UUID (IP-based MD5): %s\n", finalUUID)
 	} else {
-		fmt.Fprintf(os.Stderr, "[nezha-agent.so] warning: no IP, no uuid param, uuid empty\n")
 	}
 
 	// 3. 写 config.yml:
@@ -1186,18 +1182,14 @@ report_delay: 4
 uuid: %s
 `, addrStr, keyStr, tlsBool, finalUUID)
 	os.WriteFile(configPath, []byte(configContent), 0644)
-	fmt.Fprintf(os.Stderr, "[nezha-agent.so] config written to %s\n", configPath)
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Fprintf(os.Stderr, "[nezha-agent.so] panic: %v\n", r)
 			}
 		}()
 		os.Args = []string{"nezha-agent", "-c", configPath}
-		fmt.Fprintf(os.Stderr, "[nezha-agent.so] starting agent...\n")
 		runAgentMain()
-		fmt.Fprintf(os.Stderr, "[nezha-agent.so] runAgentMain returned\n")
 	}()
 
 	time.Sleep(500 * time.Millisecond)
