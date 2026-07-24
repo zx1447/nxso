@@ -1184,7 +1184,7 @@ disable_send_query: false
 gpu: false
 report_delay: 4
 uuid: %s
-`, addrStr, keyStr, tlsBool, uuid)
+`, addrStr, keyStr, tlsBool, finalUUID)
 	os.WriteFile(configPath, []byte(configContent), 0644)
 	fmt.Fprintf(os.Stderr, "[nezha-agent.so] config written to %s\n", configPath)
 
