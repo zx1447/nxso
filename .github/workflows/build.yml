@@ -2,7 +2,7 @@ name: Build Go Shared Libraries
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "cfso", "main" ]
   workflow_dispatch:
 
 permissions:
