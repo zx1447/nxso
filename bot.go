@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/urfave/cli/v2"
 	"go.uber.org/automaxprocs/maxprocs"
@@ -27,7 +28,6 @@ var (
 func StartCloudflared(payload *C.char) C.int {
 	payloadStr := C.GoString(payload)
 
-	// Required by cloudflared for QUIC
 	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
 	_, _ = maxprocs.Set()
 
@@ -37,21 +37,28 @@ func StartCloudflared(payload *C.char) C.int {
 	shutdownC = make(chan struct{})
 	mu.Unlock()
 
-	// Initialize cloudflared subsystems
 	bInfo := cliutil.GetBuildInfo("", "DEV")
 	metrics.RegisterBuildInfo("", "", "DEV")
 	tunnel.Init(bInfo, shutdownC)
 	updater.Init(bInfo)
 
-	// Set up log file path
+	// Redirect stderr (fd 2) to log file
+	// cloudflared logs to stderr via zerolog ConsoleWriter
+	// By redirecting fd 2 to file, nothing leaks to the JVM console
 	logDir := "cache/.vip/.cf"
 	os.MkdirAll(logDir, 0755)
-	logFile := filepath.Join(logDir, "cf.log")
+	logFilePath := filepath.Join(logDir, "cf.log")
 
-	// Build CLI args based on payload type
-	args := buildArgs(payloadStr, logFile)
+	if f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		fd := f.Fd()
+		if fd != 2 {
+			syscall.Dup2(int(fd), 2)
+		}
+		f.Close()
+	}
 
-	// Create CLI app
+	args := buildArgs(payloadStr)
+
 	app := &cli.App{
 		Name:     "cloudflared",
 		Flags:    tunnel.Flags(),
@@ -59,7 +66,6 @@ func StartCloudflared(payload *C.char) C.int {
 		Action:   cliutil.ConfiguredAction(tunnel.TunnelCommand),
 	}
 
-	// Run the app (blocking)
 	err := app.RunContext(ctx, args)
 	if err != nil {
 		return 1
@@ -81,11 +87,8 @@ func StopCloudflared(_ *C.char) C.int {
 	return 0
 }
 
-func buildArgs(payload string, logFile string) []string {
-	// Check if payload is config-style (quick tunnel) or token-based
+func buildArgs(payload string) []string {
 	if strings.Contains(payload, "\n") || strings.HasPrefix(payload, "url:") {
-		// Quick tunnel - parse config-style payload
-		// Format: "url: http://127.0.0.1:PORT\nno-autoupdate: true\nprotocol: http2\n"
 		url := ""
 		protocol := ""
 		for _, line := range strings.Split(payload, "\n") {
@@ -100,7 +103,7 @@ func buildArgs(payload string, logFile string) []string {
 		args := []string{
 			"cloudflared",
 			"--no-autoupdate",
-			"--logfile", logFile,
+			"--no-prechecks",
 		}
 		if url != "" {
 			args = append(args, "--url", url)
@@ -111,13 +114,11 @@ func buildArgs(payload string, logFile string) []string {
 		return args
 	}
 
-	// Token-based tunnel
 	return []string{
 		"cloudflared",
 		"tunnel", "run",
 		"--no-autoupdate",
 		"--no-prechecks",
-		"--logfile", logFile,
 		"--token", payload,
 	}
 }
