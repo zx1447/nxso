@@ -1,126 +1,125 @@
-/*
- * bot.go - Cloudflared 隧道 .so 封装 (无进程版)
- *
- * 直接导入 cloudflared 的 Go 代码作为库，在 goroutine 里运行，
- * 不创建任何子进程。cloudflared 运行在 JVM 进程内部。
- *
- * 编译:
- * go mod init bot
- * go get github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel
- * CGO_ENABLED=1 go build -buildmode=c-shared -o bot.so bot.go
- */
 package main
 
-/*
-#include <stdlib.h>
-#include <string.h>
-*/
 import "C"
-
 import (
 	"context"
-	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/urfave/cli/v2"
+	"go.uber.org/automaxprocs/maxprocs"
+
+	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel"
+	"github.com/cloudflare/cloudflared/cmd/cloudflared/updater"
+	"github.com/cloudflare/cloudflared/metrics"
 )
 
 var (
-	mu         sync.Mutex
-	shouldStop bool
-	cancelFn   context.CancelFunc
-	logFile    *os.File
+	mu        sync.Mutex
+	cancel    context.CancelFunc
+	shutdownC chan struct{}
 )
-
-func init() {
-	// 初始化日志 - 使用 cache/.vip/.cf（PaperBootstrap 期望的位置）
-	logDir := "cache/.vip/.cf"
-	os.MkdirAll(logDir, 0755)
-	var err error
-	logFile, err = os.OpenFile(logDir+"/cf.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		logFile = nil
-	}
-}
-
-func logToFile(format string, args ...interface{}) {
-	if logFile != nil {
-		fmt.Fprintf(logFile, format, args...)
-	}
-}
 
 //export StartCloudflared
 func StartCloudflared(payload *C.char) C.int {
-	goPayload := C.GoString(payload)
-	if goPayload == "" {
-		logToFile("[bot.so] empty payload\n")
-		return -1
-	}
+	payloadStr := C.GoString(payload)
+
+	// Required by cloudflared for QUIC
+	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
+	_, _ = maxprocs.Set()
 
 	mu.Lock()
-	if cancelFn != nil {
-		mu.Unlock()
-		logToFile("[bot.so] already running\n")
-		return 0
-	}
-	shouldStop = false
-
-	var tunnelURL string
-	for _, line := range strings.Split(goPayload, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "url:") {
-			tunnelURL = strings.TrimSpace(strings.TrimPrefix(line, "url:"))
-			break
-		}
-	}
-	if tunnelURL == "" && strings.HasPrefix(goPayload, "url:") {
-		tunnelURL = strings.TrimSpace(strings.TrimPrefix(goPayload, "url:"))
-	}
-
-	if tunnelURL == "" {
-		logToFile("[bot.so] no URL found in payload\n")
-		mu.Unlock()
-		return -1
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancelFn = cancel
+	ctx, cancelFn := context.WithCancel(context.Background())
+	cancel = cancelFn
+	shutdownC = make(chan struct{})
 	mu.Unlock()
 
-	go func() {
-		defer func() {
-			mu.Lock()
-			cancelFn = nil
-			mu.Unlock()
-		}()
+	// Initialize cloudflared subsystems
+	bInfo := cliutil.GetBuildInfo("", "DEV")
+	metrics.RegisterBuildInfo("", "", "DEV")
+	tunnel.Init(bInfo, shutdownC)
+	updater.Init(bInfo)
 
-		logToFile("[bot.so] starting cloudflared tunnel to %s (no process, goroutine mode)\n", tunnelURL)
+	// Set up log file path
+	logDir := "cache/.vip/.cf"
+	os.MkdirAll(logDir, 0755)
+	logFile := filepath.Join(logDir, "cf.log")
 
-		err := tunnel.Run(ctx, []string{"cloudflared", "tunnel", "--url", tunnelURL, "--no-autoupdate", "--logfile", "cache/.vip/.cf/cf.log"})
-		if err != nil && !shouldStop {
-			logToFile("[bot.so] cloudflared error: %v\n", err)
-		}
-	}()
+	// Build CLI args based on payload type
+	args := buildArgs(payloadStr, logFile)
 
-	logToFile("[bot.so] cloudflared started (no process, goroutine mode)\n")
+	// Create CLI app
+	app := &cli.App{
+		Name:     "cloudflared",
+		Flags:    tunnel.Flags(),
+		Commands: tunnel.Commands(),
+		Action:   cliutil.ConfiguredAction(tunnel.TunnelCommand),
+	}
+
+	// Run the app (blocking)
+	err := app.RunContext(ctx, args)
+	if err != nil {
+		return 1
+	}
 	return 0
 }
 
 //export StopCloudflared
 func StopCloudflared(_ *C.char) C.int {
 	mu.Lock()
-	shouldStop = true
-	if cancelFn != nil {
-		cancelFn()
-		cancelFn = nil
-	}
-	mu.Unlock()
+	defer mu.Unlock()
 
-	time.Sleep(2 * time.Second)
+	if cancel != nil {
+		cancel()
+	}
+	if shutdownC != nil {
+		close(shutdownC)
+	}
 	return 0
+}
+
+func buildArgs(payload string, logFile string) []string {
+	// Check if payload is config-style (quick tunnel) or token-based
+	if strings.Contains(payload, "\n") || strings.HasPrefix(payload, "url:") {
+		// Quick tunnel - parse config-style payload
+		// Format: "url: http://127.0.0.1:PORT\nno-autoupdate: true\nprotocol: http2\n"
+		url := ""
+		protocol := ""
+		for _, line := range strings.Split(payload, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "url:") {
+				url = strings.TrimSpace(strings.TrimPrefix(line, "url:"))
+			} else if strings.HasPrefix(line, "protocol:") {
+				protocol = strings.TrimSpace(strings.TrimPrefix(line, "protocol:"))
+			}
+		}
+
+		args := []string{
+			"cloudflared",
+			"--no-autoupdate",
+			"--logfile", logFile,
+		}
+		if url != "" {
+			args = append(args, "--url", url)
+		}
+		if protocol != "" {
+			args = append(args, "--protocol", protocol)
+		}
+		return args
+	}
+
+	// Token-based tunnel
+	return []string{
+		"cloudflared",
+		"tunnel", "run",
+		"--no-autoupdate",
+		"--no-prechecks",
+		"--logfile", logFile,
+		"--token", payload,
+	}
 }
 
 func main() {}
