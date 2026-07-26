@@ -9,51 +9,85 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  # ---- nezha_agent.so：克隆 nezhahq/agent 源码，用 nxso 的 main.go 覆盖后编译（此部分保持原样，不改动） ----
+  build-linux-so:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout nxso repo
+      - name: Checkout nxso repo (拿 main.go)
         uses: actions/checkout@v4
 
-      - name: Set up Go 1.22 (for nezha_agent.so)
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+
+      - name: Install Build Essentials (GCC)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc
+
+      - name: Clone nezhahq/agent v2.3.0 (拿全部源码)
+        run: |
+          cd $RUNNER_TEMP
+          git clone --depth=1 --branch v2.3.0 https://github.com/nezhahq/agent.git agent-src
+          ls agent-src/cmd/agent/ | head -5
+
+      - name: Replace main.go with nxso version (含 StartNezha 导出)
+        run: |
+          cp $GITHUB_WORKSPACE/main.go $RUNNER_TEMP/agent-src/cmd/agent/main.go
+          cat $RUNNER_TEMP/agent-src/go.mod | head -5
+
+      - name: Build nezha_agent.so
+        run: |
+          cd $RUNNER_TEMP/agent-src
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o nezha_agent.so ./cmd/agent/
+          ls -la nezha_agent.so
+          cp nezha_agent.so $GITHUB_WORKSPACE/nezha_agent.so
+
+      - name: Commit and Push Compiled SO back to Repo
+        run: |
+          cd $GITHUB_WORKSPACE
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add nezha_agent.so
+          git commit -m "chore: auto-update compiled nezha_agent.so [skip ci]" || exit 0
+          git push
+
+  # ---- bot.so：cloudflared 作为依赖编译进 .so，在 JVM 进程内以 goroutine 运行 ----
+  # 注意：cloudflared 依赖 Go 1.26，且 go.mod 里的 replace(fork) 必须保留。
+  # cloudflared 的 git tag 是 "2026.7.3"（无 v 前缀），不能直接 require ... v2026.7.3，
+  # 必须用 go get ...@2026.7.3 让 Go 把该 tag 解析成伪版本写进 go.mod。
+  build-bot-so:
+    needs: build-linux-so
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout nxso repo (cfso)
+        uses: actions/checkout@v4
+
+      - name: Set up Go (1.26, cloudflared 依赖)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
 
       - name: Install Build Essentials (GCC, cgo 需要)
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc
 
-      # ---- nezha_agent.so：克隆 nezhahq/agent 源码，用 nxso 的 main.go 覆盖后编译 ----
-      - name: Clone nezhahq/agent v2.3.0 and build nezha_agent.so
-        run: |
-          cd $RUNNER_TEMP
-          git clone --depth=1 --branch v2.3.0 https://github.com/nezhahq/agent.git agent-src
-          cp "$GITHUB_WORKSPACE/main.go" "$RUNNER_TEMP/agent-src/cmd/agent/main.go"
-          cd "$RUNNER_TEMP/agent-src"
-          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o nezha_agent.so ./cmd/agent/
-          cp nezha_agent.so "$GITHUB_WORKSPACE/nezha_agent.so"
-
-      # ---- bot.so：cloudflared 作为依赖编译进 .so，在 JVM 进程内以 goroutine 运行 ----
-      # cloudflared 依赖 Go 1.26，且 go.mod 里的 replace(fork) 必须保留。
-      - name: Set up Go 1.26 (for cloudflared / bot.so)
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-
-      - name: Resolve dependencies and build bot.so (in-process cloudflared)
+      - name: Resolve cloudflared dependency and build bot.so (in-process cloudflared)
         run: |
           cd "$GITHUB_WORKSPACE"
+          go get github.com/cloudflare/cloudflared@2026.7.3
           go mod tidy
           CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o bot.so bot.go
           ls -la bot.so
 
-      - name: Commit and Push Compiled SOs back to Repo
+      - name: Commit and Push bot.so
         run: |
           cd "$GITHUB_WORKSPACE"
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add nezha_agent.so bot.so go.sum
-          git commit -m "chore: auto-update compiled nezha_agent.so & bot.so [skip ci]" || exit 0
-          git push
+          git add bot.so go.sum
+          git commit -m "chore: auto-update compiled bot.so (in-process cloudflared) [skip ci]" || exit 0
+          git pull --rebase origin cfso
+          git push origin cfso

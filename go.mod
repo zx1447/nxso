@@ -3,8 +3,10 @@ module bot
 // cloudflared 当前要求 Go 1.26（CI 需用 go-version: '1.26'）
 go 1.26
 
-// 只需声明对 cloudflared 的直接依赖；其余传递依赖由 `go mod tidy` 补全并写入 go.sum。
-require github.com/cloudflare/cloudflared v2026.7.3
+// 注意：cloudflared 的 git tag 是 "2026.7.3"（无 v 前缀），
+// 不能直接写 require ... v2026.7.3（Go 找不到该 semver tag）。
+// 由 CI 构建步里的 `go get github.com/cloudflare/cloudflared@2026.7.3`
+// 把 tag 解析成伪版本并写入 go.mod，再 go mod tidy。
 
 // 以下 replace 指令必须与 cloudflared 自身 go.mod 保持一致。
 // replace 不会跨模块自动传递：作为下游导入者，必须在本模块里也写一遍，
