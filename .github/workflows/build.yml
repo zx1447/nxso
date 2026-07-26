@@ -36,8 +36,13 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           go get github.com/cloudflare/cloudflared@3a2b45c2a511
           go mod tidy
-          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o bot.so bot.go
-          ls -la bot.so
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
+            -buildmode=c-shared \
+            -ldflags="-s -w" \
+            -trimpath \
+            -o bot.so bot.go
+          strip bot.so
+          ls -lh bot.so
 
       - name: Commit and Push bot.so
         run: |
