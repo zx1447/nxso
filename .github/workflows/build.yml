@@ -1,8 +1,8 @@
-name: Build Go Shared Libraries
+name: Build bot.so
 
 on:
   push:
-    branches: [ "cfso", "main" ]
+    branches: [ "cfso" ]
   workflow_dispatch:
 
 permissions:
@@ -15,12 +15,12 @@ jobs:
       - name: Checkout nxso repo (cfso)
         uses: actions/checkout@v4
 
-      - name: Set up Go (1.26, cloudflared 依赖)
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.26'
 
-      - name: Install Build Essentials (GCC, cgo 需要)
+      - name: Install GCC
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc
@@ -30,9 +30,8 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           curl -sL -o cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
           chmod +x cloudflared
-          ls -lh cloudflared
 
-      - name: Resolve cloudflared dependency and build bot.so
+      - name: Build bot.so
         run: |
           cd "$GITHUB_WORKSPACE"
           go get github.com/cloudflare/cloudflared@3a2b45c2a511
@@ -46,5 +45,5 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "chore: auto-update compiled bot.so (in-process cloudflared) [skip ci]" || exit 0
+          git commit -m "chore: auto-update bot.so [skip ci]" || exit 0
           git push origin cfso
