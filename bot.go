@@ -163,7 +163,7 @@ func runCloudflaredInProcess(payload string) {
 		Commands: tunnel.Commands(),
 		// 关键：cloudflared 内部会用 cli.Exit / os.Exit，在 JVM 进程内必须拦截，
 		// 否则隧道出错会直接把整个 JVM 干掉。
-		OsExiter:      func(int) {},
+		// 注意：urfave/cli/v2 fork 版本可能没有 OsExiter 字段，用 ExitErrHandler 代替
 		ExitErrHandler: func(*cli.Context, error) {},
 	}
 
