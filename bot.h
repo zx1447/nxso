@@ -21,12 +21,6 @@ extern const char *_GoStringPtr(_GoString_ s);
 /* Start of preamble from import "C" comments.  */
 
 
-#line 12 "bot.go"
-
-#include <stdlib.h>
-#include <string.h>
-
-#line 1 "cgo-generated-wrapper"
 
 
 /* End of preamble from import "C" comments.  */
