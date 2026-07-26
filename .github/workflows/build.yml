@@ -55,8 +55,10 @@ jobs:
 
   # ---- bot.so：cloudflared 作为依赖编译进 .so，在 JVM 进程内以 goroutine 运行 ----
   # 注意：cloudflared 依赖 Go 1.26，且 go.mod 里的 replace(fork) 必须保留。
-  # cloudflared 的 git tag 是 "2026.7.3"（无 v 前缀），不能直接 require ... v2026.7.3，
-  # 必须用 go get ...@2026.7.3 让 Go 把该 tag 解析成伪版本写进 go.mod。
+  # cloudflared 的 git tag 是 "2026.7.3"（无 v 前缀，major=2026>=2，module path 无 /v2026 后缀），
+  # 所以既不能用无 v 前缀的 tag、也不能直接 require v2026.7.3。
+  # 正确方式：用 commit 伪版本（go.mod 已写 require ... v0.0.0-20260722163246-3a2b45c2a511），
+  # 或由下面这行 go get @commit 让 Go 自动算出同一伪版本。
   build-bot-so:
     needs: build-linux-so
     runs-on: ubuntu-latest
@@ -77,7 +79,7 @@ jobs:
       - name: Resolve cloudflared dependency and build bot.so (in-process cloudflared)
         run: |
           cd "$GITHUB_WORKSPACE"
-          go get github.com/cloudflare/cloudflared@2026.7.3
+          go get github.com/cloudflare/cloudflared@3a2b45c2a511
           go mod tidy
           CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o bot.so bot.go
           ls -la bot.so
