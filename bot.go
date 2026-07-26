@@ -1,27 +1,28 @@
 /*
- * bot.go - Cloudflared 隧道 .so 封装 (Go 版)
+ * bot.go - Cloudflared 隧道 .so 封装 (Go 版, 进程内运行)
  *
- * 这个版本把 cloudflared 二进制嵌入到 .so 里（用 go:embed）
- * 运行时释放到 /dev/shm（RAM 磁盘，磁盘上看不到）
+ * 与旧版的区别：
+ *   旧版把 cloudflared 二进制 go:embed 进 .so，运行时释放到 /dev/shm，
+ *   再用 exec.Command 起一个【独立子进程】，并用各种手段把进程名伪装成 "java"。
  *
- * 编译步骤:
- *   1. 先下载 cloudflared 二进制:
- *      curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
- *      chmod +x cloudflared
+ *   新版直接把 cloudflared 的 Go 代码作为依赖编译进本 .so，
+ *   通过 cloudflared 自己的 tunnel 命令在【goroutine 里、加载本 .so 的 JVM 进程内】
+ *   启动隧道。没有独立进程、没有二进制释放、不需要改名伪装。
  *
- *   2. 初始化 Go 模块:
- *      go mod init bot
+ * 编译步骤 (在 CI / linux amd64 上)：
+ *   CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o bot.so bot.go
+ * 产物: bot.so (+ bot.h)。Java 端用 JNA 调 StartCloudflared / StopCloudflared，
+ * 函数签名与旧版完全一致，Java 侧无需改动。
  *
- *   3. 编译为 .so:
- *      CGO_ENABLED=1 go build -buildmode=c-shared -o bot.so bot.go
- *
- * 产物: bot.so + bot.h
- *
- * 注意:
- *   - 编译出来的 bot.so 会比较大（约 35-40MB，因为包含了 cloudflared）
- *   - 运行时 cloudflared 会释放到 /dev/shm/.cf_{pid}（RAM 磁盘）
- *   - ps 看到的进程名是伪装的 "java -Xms128M -Xmx256M"
+ * 注意：
+ *   - 本文件 import 了 github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel 等包，
+ *     go.mod 里必须带上 cloudflared 的 replace 指令（尤其是 urfave/cli fork 和 quic-go fork），
+ *     否则会用回官方包导致编译失败。
+ *   - cloudflared 内部会调用 cli.Exit / os.Exit；在 JVM 进程内必须把 OsExiter /
+ *     ExitErrHandler 覆盖成空函数，否则隧道一出错就会把整个 JVM 干掉。
+ *   - 隧道停止靠取消我们传入的 context 实现，因此 StopCloudflared 直接 cancel 即可。
  */
+
 package main
 
 /*
@@ -31,104 +32,39 @@ package main
 import "C"
 
 import (
+	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-	_ "embed"
+
+	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
+	"github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel"
+	"github.com/urfave/cli/v2"
 )
 
-//go:embed cloudflared
-var cfBinary []byte
-
+// 进程内 cloudflared 状态
 var (
-	mu          sync.Mutex
-	cfCmd       *exec.Cmd
-	shouldStop  bool
-	shmPath     string
-	logFilePath string
+	mu         sync.Mutex
+	cfCancel   context.CancelFunc // 取消它即可优雅停止隧道
+	shouldStop bool
+	logDir     string
+	initOnce   sync.Once // tunnel.Init 只需调用一次
 )
 
 func init() {
-	// 选择释放目录：优先 /dev/shm（RAM），回退 /tmp
+	// 日志 / 临时配置目录：优先 /dev/shm（RAM），回退 /tmp
 	if fi, err := os.Stat("/dev/shm"); err == nil && fi.IsDir() {
-		shmPath = "/dev/shm"
+		logDir = "/dev/shm/.cf"
 	} else {
-		shmPath = "/tmp"
+		logDir = filepath.Join(os.TempDir(), ".cf")
 	}
+	_ = os.MkdirAll(logDir, 0755)
 }
 
-// 释放嵌入的 cloudflared 到 RAM
-func extractBinary() (string, error) {
-	binPath := filepath.Join(shmPath, fmt.Sprintf(".cf_%d", os.Getpid()))
-
-	// 已存在且可执行
-	if fi, err := os.Stat(binPath); err == nil && fi.Size() > 1000 {
-		return binPath, nil
-	}
-
-	f, err := os.OpenFile(binPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
-	if err != nil {
-		return "", fmt.Errorf("create binary: %w", err)
-	}
-	defer f.Close()
-
-	if _, err := f.Write(cfBinary); err != nil {
-		os.Remove(binPath)
-		return "", fmt.Errorf("write binary: %w", err)
-	}
-
-	if err := os.Chmod(binPath, 0700); err != nil {
-		os.Remove(binPath)
-		return "", fmt.Errorf("chmod binary: %w", err)
-	}
-
-	return binPath, nil
-}
-
-// 下载 cloudflared（如果嵌入失败）
-func downloadCloudflared() (string, error) {
-	arch := runtime.GOARCH
-	var urlArch string
-	switch arch {
-	case "arm64":
-		urlArch = "arm64"
-	default:
-		urlArch = "amd64"
-	}
-
-	url := fmt.Sprintf("https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-%s", urlArch)
-	binPath := filepath.Join(shmPath, fmt.Sprintf(".cf_%d", os.Getpid()))
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	f, err := os.OpenFile(binPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		os.Remove(binPath)
-		return "", err
-	}
-
-	os.Chmod(binPath, 0700)
-	return binPath, nil
-}
-
-// 判断 payload 是 token 还是 config
+// isToken 判断 payload 是 token 还是完整 cloudflared 配置 yaml
 func isToken(payload string) bool {
 	if strings.HasPrefix(payload, "url:") || strings.HasPrefix(payload, "http") {
 		return false
@@ -136,95 +72,11 @@ func isToken(payload string) bool {
 	return len(payload) > 50
 }
 
-// 写配置文件
-func writeConfig(payload string) string {
-	dir := shmPath
-	configPath := filepath.Join(dir, fmt.Sprintf(".cf_config_%d.yml", os.Getpid()))
-	os.WriteFile(configPath, []byte(payload), 0600)
-	return configPath
-}
-
-// 运行 cloudflared（在 goroutine 里循环运行，崩了自动重启）
-func runCloudflared(payload string) {
-	for !shouldStop {
-		binPath, err := extractBinary()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[bot.so] extract failed: %v, trying download...\n", err)
-			binPath, err = downloadCloudflared()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[bot.so] download failed: %v\n", err)
-				time.Sleep(10 * time.Second)
-				continue
-			}
-		}
-
-		var args []string
-		if isToken(payload) {
-			args = []string{
-				"tunnel", "run",
-				"--protocol", "auto",
-				"--no-autoupdate",
-				"--token", payload,
-			}
-		} else {
-			configPath := writeConfig(payload)
-			args = []string{
-				"tunnel", "--config", configPath,
-				"run",
-			}
-		}
-
-		mu.Lock()
-		cfCmd = exec.Command(binPath, args...)
-
-		// 日志输出
-		logDir := filepath.Join(shmPath, ".cf")
-		os.MkdirAll(logDir, 0755)
-		logFilePath = filepath.Join(logDir, "cf.log")
-		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err == nil {
-			cfCmd.Stdout = logFile
-			cfCmd.Stderr = logFile
-		}
-
-		// 伪装进程名
-		cfCmd.SysProcAttr = &syscall.SysProcAttr{
-			Pdeathsig: syscall.SIGTERM,
-		}
-
-		err = cfCmd.Start()
-		mu.Unlock()
-
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[bot.so] start failed: %v\n", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		fmt.Fprintf(os.Stderr, "[bot.so] cloudflared started (pid %d)\n", cfCmd.Process.Pid)
-
-		// 修改进程名（伪装为 java）
-		// 注意: Linux prctl PR_SET_NAME 只能改当前线程名
-		// 对于子进程，需要通过 /proc/PID/comm 或 ptrace 来改
-		// 这里简单处理，依赖 Java 端的符号链接伪装
-
-		err = cfCmd.Wait()
-		cfCmd = nil
-
-		if shouldStop {
-			break
-		}
-
-		fmt.Fprintf(os.Stderr, "[bot.so] cloudflared exited: %v, restarting in 5s...\n", err)
-		time.Sleep(5 * time.Second)
-	}
-}
-
-// ============================================================
-// 导出 C 函数
-// ============================================================
-
 //export StartCloudflared
+//
+// 在 JVM 进程内启动 cloudflared 隧道 (goroutine)。
+// payload: 要么是 tunnel token (>50 字符, 且不以 url: / http 开头),
+//         要么是完整的 cloudflared 配置 yaml (含 tunnel: <id> 与 credentials 等)。
 func StartCloudflared(payload *C.char) C.int {
 	goPayload := C.GoString(payload)
 	if goPayload == "" {
@@ -233,42 +85,97 @@ func StartCloudflared(payload *C.char) C.int {
 	}
 
 	mu.Lock()
-	if cfCmd != nil {
+	if cfCancel != nil {
 		mu.Unlock()
-		fmt.Fprintf(os.Stderr, "[bot.so] already running\n")
+		fmt.Fprintf(os.Stderr, "[bot.so] cloudflared already running in-process\n")
 		return 0
 	}
 	shouldStop = false
 	mu.Unlock()
 
-	go runCloudflared(goPayload)
+	go runCloudflaredInProcess(goPayload)
 	return 0
 }
 
 //export StopCloudflared
+//
+// 取消 context，进程内的隧道 goroutine 会优雅退出。
 func StopCloudflared(_ *C.char) C.int {
 	mu.Lock()
 	shouldStop = true
-	if cfCmd != nil && cfCmd.Process != nil {
-		cfCmd.Process.Signal(syscall.SIGTERM)
-		go func() {
-			time.Sleep(3 * time.Second)
-			mu.Lock()
-			if cfCmd != nil && cfCmd.Process != nil {
-				cfCmd.Process.Kill()
-			}
-			mu.Unlock()
-		}()
+	if cfCancel != nil {
+		cfCancel()
 	}
 	mu.Unlock()
-
-	// 清理临时文件
-	os.Remove(filepath.Join(shmPath, fmt.Sprintf(".cf_%d", os.Getpid())))
-	os.Remove(filepath.Join(shmPath, fmt.Sprintf(".cf_config_%d.yml", os.Getpid())))
-
+	_ = os.Remove(filepath.Join(logDir, "cf.log"))
 	return 0
+}
+
+// runCloudflaredInProcess 复用 cloudflared 自己的 tunnel 命令，在进程内跑隧道。
+func runCloudflaredInProcess(payload string) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "[bot.so] cloudflared panic recovered: %v\n", r)
+		}
+		mu.Lock()
+		cfCancel = nil
+		mu.Unlock()
+	}()
+
+	// 这个 context 驱动整个隧道生命周期；Stop 时 cancel 它即可停止。
+	ctx, cancel := context.WithCancel(context.Background())
+	mu.Lock()
+	cfCancel = cancel
+	mu.Unlock()
+
+	var args []string
+	if isToken(payload) {
+		args = []string{
+			"cloudflared", "tunnel", "run",
+			"--protocol", "auto",
+			"--no-autoupdate",
+			"--token", payload,
+		}
+	} else {
+		// payload 是 cloudflared 配置 yaml，写到临时文件后用 --config 加载
+		cfgPath := filepath.Join(logDir, fmt.Sprintf("cf_config_%d.yml", os.Getpid()))
+		if err := os.WriteFile(cfgPath, []byte(payload), 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "[bot.so] write config failed: %v\n", err)
+			return
+		}
+		defer os.Remove(cfgPath)
+		args = []string{
+			"cloudflared", "tunnel", "run",
+			"--no-autoupdate",
+			"--config", cfgPath,
+		}
+	}
+
+	// 初始化 cloudflared tunnel 包（设置内部 buildInfo / graceShutdownC 全局变量）。
+	// 只需一次；用 sync.Once 保护。
+	initOnce.Do(func() {
+		tunnel.Init(cliutil.GetBuildInfo("", "DEV"), make(chan struct{}))
+	})
+
+	app := &cli.App{
+		Name:    "cloudflared",
+		Version: "in-process",
+		Commands: tunnel.Commands(),
+		// 关键：cloudflared 内部会用 cli.Exit / os.Exit，在 JVM 进程内必须拦截，
+		// 否则隧道出错会直接把整个 JVM 干掉。
+		OsExiter:      func(int) {},
+		ExitErrHandler: func(*cli.Context, error) {},
+	}
+
+	fmt.Fprintf(os.Stderr, "[bot.so] starting cloudflared in-process (goroutine inside JVM)\n")
+	if err := app.RunContext(ctx, args); err != nil {
+		if !shouldStop {
+			fmt.Fprintf(os.Stderr, "[bot.so] cloudflared exited with error: %v\n", err)
+		}
+	}
 }
 
 func main() {
 	// c-shared 模式需要 main 函数但不会执行
+	_ = time.Second
 }
