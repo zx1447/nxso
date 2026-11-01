@@ -48,6 +48,11 @@ import (
 	pb "github.com/nezhahq/agent/proto"
 )
 
+// defaultAgentVersion 在没有通过 ldflags 注入版本号时使用的回退值。
+// c-shared (.so) 构建不走 GoReleaser，monitor.Version 默认为空字符串，
+// 面板上就会显示"没有版本号"。这里给一个固定版本，保证 .so 也有版本。
+const defaultAgentVersion = "9.9.9"
+
 var (
 	version               = monitor.Version // 来自于 GoReleaser 的版本号
 	arch                  string
@@ -98,6 +103,19 @@ const (
 
 	binaryName = "nezha-agent"
 )
+
+func init() {
+	// GoReleaser 构建时会用 ldflags 注入 monitor.Version；
+	// c-shared(.so) / 普通 go build 不会，此时回退到 defaultAgentVersion。
+	// 注意：上报给面板的版本号来自 monitor.Version (pkg/monitor/host.go)，
+	// 所以两个变量都要兜底，否则面板上不显示版本。
+	if monitor.Version == "" {
+		monitor.Version = defaultAgentVersion
+	}
+	if version == "" {
+		version = monitor.Version
+	}
+}
 
 func setEnv() {
 	resolver.SetDefaultScheme("passthrough")

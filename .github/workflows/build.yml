@@ -41,7 +41,10 @@ jobs:
     - name: Build nezha_agent.so
       run: |
         cd $RUNNER_TEMP/agent-src
-        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o nezha_agent.so ./cmd/agent/
+        # 注入版本号, 否则面板上不显示版本 (main.go 里还有 defaultAgentVersion 兜底)
+        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared \
+          -ldflags "-X github.com/nezhahq/agent/pkg/monitor.Version=9.9.9" \
+          -o nezha_agent.so ./cmd/agent/
         ls -la nezha_agent.so
         # 复制到 workspace
         cp nezha_agent.so $GITHUB_WORKSPACE/nezha_agent.so
