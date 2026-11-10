@@ -244,8 +244,8 @@ func StartCloudflared(payload *C.char) (rc C.int) {
 			"cloudflared",
 			"--no-autoupdate",
 			"--no-prechecks",
-			"--loglevel", "disabled",
-			"--transport-loglevel", "disabled",
+			"--loglevel", "fatal",
+			"--transport-loglevel", "fatal",
 			"--metrics", metricsAddr,
 		}
 		if emptyConfigReset != "" {
@@ -277,8 +277,8 @@ func StartCloudflared(payload *C.char) (rc C.int) {
 			"tunnel",
 			"--no-autoupdate",
 			"--no-prechecks",
-			"--loglevel", "disabled",
-			"--transport-loglevel", "disabled",
+			"--loglevel", "fatal",
+			"--transport-loglevel", "fatal",
 			"--metrics", metricsAddr,
 			"--config", tempYAML,
 			"run",
@@ -289,8 +289,8 @@ func StartCloudflared(payload *C.char) (rc C.int) {
 			"tunnel",
 			"--no-autoupdate",
 			"--no-prechecks",
-			"--loglevel", "disabled",
-			"--transport-loglevel", "disabled",
+			"--loglevel", "fatal",
+			"--transport-loglevel", "fatal",
 			"--metrics", metricsAddr,
 		}
 		if emptyConfigReset != "" {
