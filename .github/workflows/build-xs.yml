@@ -25,6 +25,7 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: '1.27'
+        cache: false
 
     - name: Install cross compiler (linux/arm64)
       run: |
@@ -32,7 +33,7 @@ jobs:
         sudo apt-get install -y gcc-aarch64-linux-gnu
 
     # ===================== Xray-core =====================
-    # 升级版本: 改下面两处 --branch 和 ldflags 里的 tag (需确认 wrapper API 兼容)
+    # 升级版本: 改下面 --branch 标签 (需确认 wrapper API 兼容)
     - name: Clone Xray-core v26.11.9
       run: |
         cd $RUNNER_TEMP
@@ -44,14 +45,16 @@ jobs:
         mkdir -p libxray
         cp $GITHUB_WORKSPACE/xray_wrapper.go libxray/main.go
         XRAY_COMMIT=$(git rev-parse --short HEAD)
-        LDF="-s -w -X 'github.com/xtls/xray-core/core.build=$XRAY_COMMIT'"
+        LDF="-s -w -buildid= -X 'github.com/xtls/xray-core/core.build=$XRAY_COMMIT'"
         CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -trimpath \
           -ldflags "$LDF" -o $GITHUB_WORKSPACE/xray.so ./libxray
         CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -buildmode=c-shared -trimpath \
           -ldflags "$LDF" -o $GITHUB_WORKSPACE/xray_arm64.so ./libxray
+        rm -f $GITHUB_WORKSPACE/xray_arm64.h
         ls -la $GITHUB_WORKSPACE/xray.so $GITHUB_WORKSPACE/xray.h $GITHUB_WORKSPACE/xray_arm64.so
 
     # ===================== sing-box =====================
+    # 升级版本: 改下面 --branch 和 ldflags 里的 Constant.Version (并核对 release/DEFAULT_BUILD_TAGS_OTHERS & release/LDFLAGS)
     - name: Clone sing-box v1.14.4
       run: |
         cd $RUNNER_TEMP
@@ -62,12 +65,16 @@ jobs:
         cd $RUNNER_TEMP/singbox-src
         mkdir -p cmd/singboxso
         cp $GITHUB_WORKSPACE/singbox_wrapper.go cmd/singboxso/main.go
-        TAGS="with_gvisor,with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,badlinkname,tfogo_checklinkname0"
-        LDF="-s -w -buildid= -X 'github.com/sagernet/sing-box/constant.Version=v1.14.4'"
+        # 注: 已移除 sing-box v1.14 中不存在的 with_grpc，保留轻量代理常用 tags；
+        # 若需完整对齐上游 DEFAULT_BUILD_TAGS_OTHERS，可再补充:
+        # with_tailscale,with_ccm,with_ocm,with_cloudflared,with_usbip,with_openvpn,with_openconnect
+        TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,badlinkname,tfogo_checklinkname0"
+        LDF="-s -w -buildid= -checklinkname=0 -X 'runtime.godebugDefault=multipathtcp=0,tlssha1=1' -X 'github.com/sagernet/sing-box/constant.Version=v1.14.4'"
         CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -trimpath -tags "$TAGS" \
           -ldflags "$LDF" -o $GITHUB_WORKSPACE/singbox.so ./cmd/singboxso
         CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -buildmode=c-shared -trimpath -tags "$TAGS" \
           -ldflags "$LDF" -o $GITHUB_WORKSPACE/singbox_arm64.so ./cmd/singboxso
+        rm -f $GITHUB_WORKSPACE/singbox_arm64.h
         ls -la $GITHUB_WORKSPACE/singbox.so $GITHUB_WORKSPACE/singbox.h $GITHUB_WORKSPACE/singbox_arm64.so
 
     - name: Commit and Push Compiled SO back to Repo
@@ -77,4 +84,4 @@ jobs:
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git add xray.so xray.h xray_arm64.so singbox.so singbox.h singbox_arm64.so
         git commit -m "chore: auto-update compiled xray.so (v26.11.9) & singbox.so (v1.14.4) [skip ci]" || exit 0
-        git push
+        git push origin xs
