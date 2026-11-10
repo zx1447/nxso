@@ -21,6 +21,11 @@ extern const char *_GoStringPtr(_GoString_ s);
 /* Start of preamble from import "C" comments.  */
 
 
+#line 3 "bot.go"
+
+#include <stdlib.h>
+
+#line 1 "cgo-generated-wrapper"
 
 
 /* End of preamble from import "C" comments.  */
@@ -84,6 +89,11 @@ extern "C" {
 
 extern int StartCloudflared(char* payload);
 extern int StopCloudflared(char* _);
+extern int CloudflaredIsRunning(void);
+extern char* CloudflaredLastError(void);
+extern char* CloudflaredTunnelUrl(void);
+extern char* CloudflaredVersion(void);
+extern void CloudflaredFree(char* ptr);
 
 #ifdef __cplusplus
 }
