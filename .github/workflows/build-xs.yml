@@ -1,0 +1,80 @@
+name: Build Xray & Singbox Shared Libraries
+
+on:
+  push:
+    branches: [ "xs" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-xs
+  cancel-in-progress: false
+
+jobs:
+  build-xs-so:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout nxso repo (拿 wrapper 源码)
+      uses: actions/checkout@v4
+      with:
+        ref: xs
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.27'
+
+    - name: Install cross compiler (linux/arm64)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+
+    # ===================== Xray-core =====================
+    # 升级版本: 改下面两处 --branch 和 ldflags 里的 tag (需确认 wrapper API 兼容)
+    - name: Clone Xray-core v26.11.9
+      run: |
+        cd $RUNNER_TEMP
+        git clone --depth=1 --branch v26.11.9 https://github.com/XTLS/Xray-core.git xray-src
+
+    - name: Build xray.so (linux amd64 + arm64)
+      run: |
+        cd $RUNNER_TEMP/xray-src
+        mkdir -p libxray
+        cp $GITHUB_WORKSPACE/xray_wrapper.go libxray/main.go
+        XRAY_COMMIT=$(git rev-parse --short HEAD)
+        LDF="-s -w -X 'github.com/xtls/xray-core/core.build=$XRAY_COMMIT'"
+        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -trimpath \
+          -ldflags "$LDF" -o $GITHUB_WORKSPACE/xray.so ./libxray
+        CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -buildmode=c-shared -trimpath \
+          -ldflags "$LDF" -o $GITHUB_WORKSPACE/xray_arm64.so ./libxray
+        ls -la $GITHUB_WORKSPACE/xray.so $GITHUB_WORKSPACE/xray.h $GITHUB_WORKSPACE/xray_arm64.so
+
+    # ===================== sing-box =====================
+    - name: Clone sing-box v1.14.4
+      run: |
+        cd $RUNNER_TEMP
+        git clone --depth=1 --branch v1.14.4 https://github.com/SagerNet/sing-box.git singbox-src
+
+    - name: Build singbox.so (linux amd64 + arm64)
+      run: |
+        cd $RUNNER_TEMP/singbox-src
+        mkdir -p cmd/singboxso
+        cp $GITHUB_WORKSPACE/singbox_wrapper.go cmd/singboxso/main.go
+        TAGS="with_gvisor,with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,badlinkname,tfogo_checklinkname0"
+        LDF="-s -w -buildid= -X 'github.com/sagernet/sing-box/constant.Version=v1.14.4'"
+        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -trimpath -tags "$TAGS" \
+          -ldflags "$LDF" -o $GITHUB_WORKSPACE/singbox.so ./cmd/singboxso
+        CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -buildmode=c-shared -trimpath -tags "$TAGS" \
+          -ldflags "$LDF" -o $GITHUB_WORKSPACE/singbox_arm64.so ./cmd/singboxso
+        ls -la $GITHUB_WORKSPACE/singbox.so $GITHUB_WORKSPACE/singbox.h $GITHUB_WORKSPACE/singbox_arm64.so
+
+    - name: Commit and Push Compiled SO back to Repo
+      run: |
+        cd $GITHUB_WORKSPACE
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add xray.so xray.h xray_arm64.so singbox.so singbox.h singbox_arm64.so
+        git commit -m "chore: auto-update compiled xray.so (v26.11.9) & singbox.so (v1.14.4) [skip ci]" || exit 0
+        git push
