@@ -89,8 +89,10 @@ extern "C" {
 
 extern int StartXray(char* configJson);
 extern int StopXray(void);
+extern int XrayIsRunning(void);
 extern char* XrayLastError(void);
 extern char* XrayVersion(void);
+extern void XrayFree(void* ptr);
 
 #ifdef __cplusplus
 }

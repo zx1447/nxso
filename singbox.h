@@ -89,8 +89,10 @@ extern "C" {
 
 extern int StartSingbox(char* configJson);
 extern int StopSingbox(void);
+extern int SingboxIsRunning(void);
 extern char* SingboxLastError(void);
 extern char* SingboxVersion(void);
+extern void SingboxFree(void* ptr);
 
 #ifdef __cplusplus
 }
