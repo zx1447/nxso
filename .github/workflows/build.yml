@@ -20,10 +20,10 @@ jobs:
       with:
         go-version: '1.22'
 
-    - name: Install Build Essentials (GCC)
+    - name: Install Build Essentials (GCC + arm64 cross compiler)
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc
+        sudo apt-get install -y gcc gcc-aarch64-linux-gnu
 
     - name: Clone nezhahq/agent v2.3.0 (拿全部源码)
       run: |
@@ -38,22 +38,27 @@ jobs:
         # 看 go.mod
         cat $RUNNER_TEMP/agent-src/go.mod | head -5
 
-    - name: Build nezha_agent.so
+    - name: Build nezha_agent.so (linux amd64 + arm64)
       run: |
         cd $RUNNER_TEMP/agent-src
         # 注入版本号, 否则面板上不显示版本 (main.go 里还有 defaultAgentVersion 兜底)
         CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared \
           -ldflags "-X github.com/nezhahq/agent/pkg/monitor.Version=9.9.9" \
           -o nezha_agent.so ./cmd/agent/
-        ls -la nezha_agent.so
+        CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -buildmode=c-shared \
+          -ldflags "-X github.com/nezhahq/agent/pkg/monitor.Version=9.9.9" \
+          -o nezha_agent_arm64.so ./cmd/agent/
+        # 确认两个产物架构无误
+        file nezha_agent.so nezha_agent_arm64.so
+        ls -la nezha_agent.so nezha_agent.h nezha_agent_arm64.so
         # 复制到 workspace
-        cp nezha_agent.so $GITHUB_WORKSPACE/nezha_agent.so
+        cp nezha_agent.so nezha_agent.h nezha_agent_arm64.so $GITHUB_WORKSPACE/
 
     - name: Commit and Push Compiled SO back to Repo
       run: |
         cd $GITHUB_WORKSPACE
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add nezha_agent.so
-        git commit -m "chore: auto-update compiled nezha_agent.so [skip ci]" || exit 0
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add nezha_agent.so nezha_agent.h nezha_agent_arm64.so
+        git commit -m "chore: auto-update compiled nezha_agent.so & nezha_agent_arm64.so [skip ci]" || exit 0
         git push
