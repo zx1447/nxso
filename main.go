@@ -475,7 +475,8 @@ func reportState(statClient reportStateClient, schedule reportSchedule, config r
 	}
 	if initialized {
 		reportMonitorDependencies.trackNetworkSpeed(config.snapshot)
-		if err := statClient.Send(reportMonitorDependencies.getState(config.snapshot, config.skipConnectionCount, config.skipProcsCount).PB()); err != nil {
+		// ★ 关闭进程数量上报: 不再枚举 /proc 统计进程数 (硬编码跳过, 面板开关无效)
+		if err := statClient.Send(reportMonitorDependencies.getState(config.snapshot, config.skipConnectionCount, true).PB()); err != nil {
 			return schedule, err
 		}
 		_, err := statClient.Recv()
