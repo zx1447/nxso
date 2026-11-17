@@ -438,6 +438,8 @@ func reportStateDaemon(stateClient *reportStateSession, requestExit func(error))
 	defer func() { stateClient.finishTerminal(err) }()
 	for {
 		config := loadRuntimeConfig()
+		// ★ 上报间隔固定 4 秒: 面板/云端推什么值都覆盖 (合法范围 1-4, 默认 3)
+		config.ReportDelay = 4
 		reportConfig := reportConfigTupleFrom(config)
 		schedule, reportErr := reportState(stateClient, reportSchedule{host: lastReportHostInfo, ip: lastReportIPInfo}, reportConfig)
 		lastReportHostInfo, lastReportIPInfo, err = schedule.host, schedule.ip, reportErr
